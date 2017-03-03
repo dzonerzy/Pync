@@ -924,6 +924,12 @@ def run(args):
                 exit()
     except KeyboardInterrupt:
         pass
+    except ProxyConnectionError as e:
+        __builtin__.print(e)
+        exit()
+    except SOCKS5Error:
+        __builtin__.print("Error: Socks proxy error (err=5): Connection refused")
+        exit()
     except socket.error as e:
         __builtin__.print("Error: Generic error (err={0}): {1}".format(e.args[0], e.args[1]))
         exit()
