@@ -8,6 +8,7 @@ Netcat for Python, simple script which provide a netcat like interface for Pytho
 - Multiple connection
 - Scripting language (Python)
 - Exe over socket
+- Socks proxy
 
 # New features
 
