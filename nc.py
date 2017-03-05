@@ -27,8 +27,56 @@ import telnetlib
 import argparse
 import subprocess
 import select
+import signal
+import time
+from cmd import Cmd
 
 # SOCKS
+
+"""
+SocksiPy - Python SOCKS module.
+Copyright 2006 Dan-Haim. All rights reserved.
+Redistribution and use in source and binary forms, with or without modification,
+are permitted provided that the following conditions are met:
+1. Redistributions of source code must retain the above copyright notice, this
+   list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright notice,
+   this list of conditions and the following disclaimer in the documentation
+   and/or other materials provided with the distribution.
+3. Neither the name of Dan Haim nor the names of his contributors may be used
+   to endorse or promote products derived from this software without specific
+   prior written permission.
+THIS SOFTWARE IS PROVIDED BY DAN HAIM "AS IS" AND ANY EXPRESS OR IMPLIED
+WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF
+MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE DISCLAIMED. IN NO
+EVENT SHALL DAN HAIM OR HIS CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT,
+INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT
+LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA
+OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT
+OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMANGE.
+This module provides a standard socket-like interface for Python
+for tunneling connections through SOCKS proxies.
+===============================================================================
+Minor modifications made by Christopher Gilbert (http://motomastyle.com/)
+for use in PyLoris (http://pyloris.sourceforge.net/)
+Minor modifications made by Mario Vilas (http://breakingcode.wordpress.com/)
+mainly to merge bug fixes found in Sourceforge
+Modifications made by Anorov (https://github.com/Anorov)
+-Forked and renamed to PySocks
+-Fixed issue with HTTP proxy failure checking (same bug that was in the old ___recvall() method)
+-Included SocksiPyHandler (sockshandler.py), to be used as a urllib2 handler,
+ courtesy of e000 (https://github.com/e000): https://gist.github.com/869791#file_socksipyhandler.py
+-Re-styled code to make it readable
+    -Aliased PROXY_TYPE_SOCKS5 -> SOCKS5 etc.
+    -Improved exception handling and output
+    -Removed irritating use of sequence indexes, replaced with tuple unpacked variables
+    -Fixed up Python 3 bytestring handling - chr(0x03).encode() -> b"\x03"
+    -Other general fixes
+-Added clarification that the HTTP proxy connection method only supports CONNECT-style tunneling HTTP proxies
+-Various small bug fixes
+"""
+
 import socket
 import struct
 from errno import EOPNOTSUPP, EINVAL, EAGAIN
@@ -793,6 +841,7 @@ args = parser.parse_args()
 class myTelnet(telnetlib.Telnet):
 
     def read_available(self):
+        """ Read data when available """
         text = ""
         while 1:
             rfd, wfd, xfd = select.select([self, sys.stdin], [], [])
@@ -805,16 +854,223 @@ class myTelnet(telnetlib.Telnet):
                     break
         return text
 
+    def read_timeout(self, timeout=1):
+        """ Read data with a given timeout """
+        t = int(round(time.time() * 1000))
+        text = ""
+        got_something = False
+        empty_count = 0
+        while not int(round(time.time() * 1000)) - t > timeout * 1000 and empty_count < 5:
+            tmp = self.read_eager()
+            if tmp:
+                got_something = True
+                text += tmp
+            elif not tmp and got_something:
+                empty_count += 1
+        return text
+
+    def interact(self):
+        """Interaction function, emulates a very dumb telnet client."""
+        try:
+            if sys.platform == "win32":
+                self.mt_interact()
+                return
+            while 1:
+                rfd, wfd, xfd = select.select([self, sys.stdin], [], [])
+                if self in rfd:
+                    try:
+                        text = self.read_eager()
+                    except EOFError:
+                        __builtin__.print('*** Connection closed by remote host ***')
+                        break
+                    if text:
+                        sys.stdout.write(text)
+                        sys.stdout.flush()
+                if sys.stdin in rfd:
+                    line = sys.stdin.readline()
+                    if not line:
+                        break
+                    self.write(line)
+        except select.error:
+            pass
 
     def __del__(self):
         try:
-            super(myTelnet, self).__del__()
+            telnetlib.Telnet.__del__(self)
         except Exception:
             pass
 
+class InterctiveConsole(Cmd):
+
+    def __init__(self, t):
+        Cmd.__init__(self)
+        self.prompt = "(pync): "
+        self.intro = "[+] Pync Interactive Console (use CTRL+C to exit)"
+        self.telnet = t
+
+    def do_smtpverify(self, user):
+        """
+        smtpverify <user>
+
+        Try to verify user existence on smtp server
+        """
+        def get_code(line):
+            try:
+                return line.split(" ")[0]
+            except IndexError:
+                return ""
+
+        self.telnet.write("VRFY {0}\n".format(user))
+        c = get_code(self.telnet.read_available())
+        if c == "252":
+            __builtin__.print("[+] User {0} exists!".format(user))
+        else:
+            __builtin__.print("[-] User {0} does not exists!".format(user))
+
+    def do_smtpmail(self, recipient):
+        """
+        smtpmail <recipient>
+
+        Try to use smtp server as an open relay
+        """
+        def get_code(line):
+            try:
+                return line.split(" ")[0]
+            except IndexError:
+                return ""
+
+        self.telnet.write("HELO domain.com\n")
+        self.telnet.read_available()
+        self.telnet.write("MAIL FROM: <root@localhot>\n")
+        c = get_code(self.telnet.read_available())
+        if c == "250":
+            self.telnet.write("RCPT TO: <{0}>\n".format(recipient))
+            c = get_code(self.telnet.read_available())
+            if c == "250":
+                self.telnet.write("DATA\n")
+                self.telnet.read_available()
+                self.telnet.write("test\r\n.\r\n")
+                c = get_code(self.telnet.read_available())
+                if c == "250":
+                    __builtin__.print("[+] Mail sent!")
+                else:
+                    __builtin__.print("[-] Error while sending mail!")
+            else:
+                __builtin__.print("[-] Error while setting recipient!")
+        else:
+            __builtin__.print("[-] Error while setting sender!")
+
+    def do_popauth(self, user_password):
+        """
+        popauth <user> <pass>
+
+        Try to authenticate on pop3 server with specified user and password
+        """
+        def get_code(line):
+            try:
+                return line.split(" ")[0]
+            except IndexError:
+                return ""
+
+        if user_password:
+            try:
+                user, password = tuple(user_password.split(" "))
+                if user and password:
+                    self.telnet.write("USER {0}\n".format(user))
+                    self.telnet.read_timeout()
+                    self.telnet.write("PASS {0}\n".format(password))
+                    c = get_code(self.telnet.read_available())
+                    if c != "-ERR":
+                        __builtin__.print("[+] Login successful with {0}:{1}".format(user, password))
+                    else:
+                        __builtin__.print("[-] Login failed!")
+                else:
+                    __builtin__.print("Error: You must specify both user and password")
+            except ValueError:
+                __builtin__.print("Error: You must specify both user and password")
+        else:
+             __builtin__.print("Error: You must specify user and password")
+
+    def do_popmail(self, line):
+        """
+        popmails
+
+        Try to list pop3 mails after a successful login
+        """
+        self.telnet.write("LIST\n")
+        __builtin__.print(self.telnet.read_available())
+
+    def do_ftpauth(self, user_password):
+        """
+        ftpauth <user> <pass>
+
+        Try to authenticate on ftp server with specified user and password
+        """
+        def get_code(line):
+            try:
+                return line.split(" ")[0]
+            except IndexError:
+                return ""
+
+        if user_password:
+            try:
+                user, password = tuple(user_password.split(" "))
+                if user and password:
+                    self.telnet.write("USER {0}\n".format(user))
+                    self.telnet.read_timeout()
+                    self.telnet.write("PASS {0}\n".format(password))
+                    c = get_code(self.telnet.read_available())
+                    if c  != "530":
+                        __builtin__.print("[+] Login successful with {0}:{1}".format(user, password))
+                    else:
+                        __builtin__.print("[-] Login failed!")
+                else:
+                    __builtin__.print("Error: You must specify both user and password")
+            except ValueError:
+                __builtin__.print("Error: You must specify both user and password")
+        else:
+             __builtin__.print("Error: You must specify user and password")
+
+    def do_httpget(self, host):
+        """
+        httpget <hostname>
+
+        Send an HTTP GET with specified hostname as Host
+        """
+        if host:
+            self.telnet.write("GET / HTTP/1.1\r\nHost: {0}\r\n\r\n".format(host))
+            __builtin__.print(self.telnet.read_available())
+        else:
+            __builtin__.print("Error: You must specify an hostname")
+
+    def do_httppost(self, host):
+        """
+        httppost <hostname>
+
+        Send an HTTP POST with specified hostname as Host
+        """
+        if host:
+            self.telnet.write("POST / HTTP/1.1\r\nHost: {0}\r\nContent-Type: application/x-www-form-urlencoded\r\n"
+                              "Content-Length: 4\r\n\r\ntest".format(host))
+            __builtin__.print(self.telnet.read_available())
+        else:
+            __builtin__.print("Error: You must specify an hostname")
+
 def run(args):
+
+    t = myTelnet()
+
+    def signal_handler(*args):
+        console = InterctiveConsole(t)
+        try:
+            console.cmdloop()
+        except KeyboardInterrupt:
+            __builtin__.print("\n[-] Stopping interactive console")
+            t.interact()
+
+    signal.signal(signal.SIGINFO, signal_handler)
+
     try:
-        t = myTelnet()
         if args.version:
             __builtin__.print("Python netcat (The GNU Netcat) {0}\n"
                               "Copyright (C) 2017 - 2018  Daniele Linguaglossa\n"
